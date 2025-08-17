@@ -7,6 +7,7 @@
 # - Detecta, baixa e compila dependências essenciais (zlib, bzip2, xz, pcre2, curl) se não estiverem no sistema.
 # - Cria wrappers para R/Rscript que carregam o ambiente correto.
 # - Mantém a instalação organizada em ~/.local por padrão.
+# - Configura automaticamente o PATH para incluir ~/.local/bin se necessário.
 
 set -euo pipefail
 
@@ -187,136 +188,169 @@ ensure_all_dependencies() {
     ok "Verificação de dependências concluída."
 }
 
+# --- Verificação e Configuração do PATH ---
+setup_path() {
+    log "Verificando se ${BIN_DIR} está no PATH..."
+    if [[ ":$PATH:" != *":${BIN_DIR}:"* ]]; then
+        warn "O diretório ${BIN_DIR} não está no seu PATH."
+
+        # Detecta o arquivo de configuração correto
+        local shell_config
+        case "$SHELL" in
+            */bash) shell_config="$HOME/.bashrc" ;;
+            */zsh)  shell_config="$HOME/.zshrc"  ;;
+            *)      shell_config="$HOME/.profile" ;;
+        esac
+
+        # Sugere a adição ao PATH
+        warn "Para acessar o comando R diretamente, adicione isto ao seu ${shell_config}:"
+        echo "export PATH=\"${BIN_DIR}:\$PATH\""
+
+        # Oferece para adicionar automaticamente
+        read -p "Deseja adicionar automaticamente ao seu ${shell_config}? [s/N] " resposta
+        if [[ "$resposta" =~ ^[SsYy] ]]; then
+            echo "export PATH=\"${BIN_DIR}:\$PATH\"" >> "$shell_config"
+            source "$shell_config"
+            ok "Adicionado ao ${shell_config}. Execute 'source ${shell_config}' ou abra um novo terminal."
+        else
+            warn "Lembre-se de adicionar manualmente ao seu PATH para usar o comando R diretamente."
+        fi
+    else
+        ok "${BIN_DIR} já está no PATH."
+    fi
+}
+
 # --- Lógica Principal ---
-# Diretório de build temporário no HOME (evitar /tmp pequeno)
-log "Configurando diretório de build temporário em $HOME..."
-SRC_ROOT="$(mktemp -d -p "${HOME}" r_build.XXXXXX)"
-trap 'rm -rf "$SRC_ROOT"' EXIT
-export TMPDIR="$SRC_ROOT"
-ok "Diretório de build temporário: $SRC_ROOT"
+main() {
+    # Diretório de build temporário no HOME (evitar /tmp pequeno)
+    log "Configurando diretório de build temporário em $HOME..."
+    SRC_ROOT="$(mktemp -d -p "${HOME}" r_build.XXXXXX)"
+    trap 'rm -rf "$SRC_ROOT"' EXIT
+    export TMPDIR="$SRC_ROOT"
+    ok "Diretório de build temporário: $SRC_ROOT"
 
-log "Verificando ferramentas básicas..."
-for cmd in curl tar grep sed awk make uname file; do
-    command -v "$cmd" >/dev/null 2>&1 || die "Comando essencial não encontrado: '$cmd'."
-done
-ok "Ferramentas básicas encontradas."
+    log "Verificando ferramentas básicas..."
+    for cmd in curl tar grep sed awk make uname file; do
+        command -v "$cmd" >/dev/null 2>&1 || die "Comando essencial não encontrado: '$cmd'."
+    done
+    ok "Ferramentas básicas encontradas."
 
-# 1. Configurar compiladores (baixar se necessário)
-setup_compilers
+    # 1. Configurar compiladores (baixar se necessário)
+    setup_compilers
 
-# 2. Garantir que as dependências essenciais existam (compilar se necessário)
-ensure_all_dependencies
+    # 2. Garantir que as dependências essenciais existam (compilar se necessário)
+    ensure_all_dependencies
 
-# 3. Determinar a versão do R
-if [[ -z "$R_VERSION" ]]; then
-  log "Consultando CRAN pela versão mais recente do R..."
-  # tenta série R-4 primeiro
-  R_VERSION=$(curl -s "https://cloud.r-project.org/src/base/R-4/" | grep -oE 'R-[0-9]+\.[0-9]+\.[0-9]+' | sed 's/R-//' | sort -rV | head -n1)
-  if [[ -z "$R_VERSION" ]]; then
-    # fallback genérico
-    R_VERSION=$(curl -s "https://cloud.r-project.org/src/base/" | grep -oE 'R-[0-9]+\.[0-9]+\.[0-9]+' | sed 's/R-//' | sort -rV | head -n1)
-  fi
-  [[ -n "$R_VERSION" ]] || die "Não foi possível detectar a versão mais recente do R."
-fi
-ok "Versão do R a ser instalada: ${R_VERSION}"
+    # 3. Determinar a versão do R
+    if [[ -z "$R_VERSION" ]]; then
+      log "Consultando CRAN pela versão mais recente do R..."
+      # tenta série R-4 primeiro
+      R_VERSION=$(curl -s "https://cloud.r-project.org/src/base/R-4/" | grep -oE 'R-[0-9]+\.[0-9]+\.[0-9]+' | sed 's/R-//' | sort -rV | head -n1)
+      if [[ -z "$R_VERSION" ]]; then
+        # fallback genérico
+        R_VERSION=$(curl -s "https://cloud.r-project.org/src/base/" | grep -oE 'R-[0-9]+\.[0-9]+\.[0-9]+' | sed 's/R-//' | sort -rV | head -n1)
+      fi
+      [[ -n "$R_VERSION" ]] || die "Não foi possível detectar a versão mais recente do R."
+    fi
+    ok "Versão do R a ser instalada: ${R_VERSION}"
 
-# 4. Preparar diretórios de instalação
-INSTALL_DIR="${PREFIX}/R/R-${R_VERSION}"
-if [[ -d "$INSTALL_DIR" ]]; then warn "O diretório de instalação ${INSTALL_DIR} já existe."; fi
-mkdir -p "$INSTALL_DIR" "$BIN_DIR"
+    # 4. Preparar diretórios de instalação
+    INSTALL_DIR="${PREFIX}/R/R-${R_VERSION}"
+    if [[ -d "$INSTALL_DIR" ]]; then warn "O diretório de instalação ${INSTALL_DIR} já existe."; fi
+    mkdir -p "$INSTALL_DIR" "$BIN_DIR"
 
-# 5. Baixar o código-fonte do R
-R_MAJOR="${R_VERSION%%.*}"
-R_TARBALL="R-${R_VERSION}.tar.gz"
-R_URL="https://cloud.r-project.org/src/base/R-${R_MAJOR}/${R_TARBALL}"
+    # 5. Baixar o código-fonte do R
+    R_MAJOR="${R_VERSION%%.*}"
+    R_TARBALL="R-${R_VERSION}.tar.gz"
+    R_URL="https://cloud.r-project.org/src/base/R-${R_MAJOR}/${R_TARBALL}"
 
-log "Baixando ${R_URL}..."
-curl -L --progress-bar --fail "${R_URL}" -o "${SRC_ROOT}/${R_TARBALL}" || die "Download do R falhou."
+    log "Baixando ${R_URL}..."
+    curl -L --progress-bar --fail "${R_URL}" -o "${SRC_ROOT}/${R_TARBALL}" || die "Download do R falhou."
 
-log "Extraindo código-fonte..."
-tar -C "$SRC_ROOT" -xzf "${SRC_ROOT}/${R_TARBALL}"
-SRC_DIR="${SRC_ROOT}/R-${R_VERSION}"
+    log "Extraindo código-fonte..."
+    tar -C "$SRC_ROOT" -xzf "${SRC_ROOT}/${R_TARBALL}"
+    SRC_DIR="${SRC_ROOT}/R-${R_VERSION}"
 
-# 6. Configurar a compilação (inclui rpath para bibliotecas locais)
-log "Configurando o build do R..."
-cd "$SRC_DIR"
+    # 6. Configurar a compilação (inclui rpath para bibliotecas locais)
+    log "Configurando o build do R..."
+    cd "$SRC_DIR"
 
-CONFIGURE_FLAGS=(
-  "--prefix=${INSTALL_DIR}"
-  "--enable-R-shlib"
-  "--with-recommended-packages=$([[ $WITHOUT_RECOMMENDED -eq 1 ]] && echo no || echo yes)"
-)
+    CONFIGURE_FLAGS=(
+      "--prefix=${INSTALL_DIR}"
+      "--enable-R-shlib"
+      "--with-recommended-packages=$([[ $WITHOUT_RECOMMENDED -eq 1 ]] && echo no || echo yes)"
+    )
 
-# Detecta recursos gráficos
-if gcc -E - >/dev/null 2>&1 <<< "#include <readline/readline.h>"; then CONFIGURE_FLAGS+=("--with-readline=yes"); else CONFIGURE_FLAGS+=("--with-readline=no"); fi
-if [[ "$HEADLESS" -eq 1 ]]; then
-  CONFIGURE_FLAGS+=( "--with-x=no" "--with-cairo=no" )
-else
-  if gcc -E - >/dev/null 2>&1 <<< "#include <X11/Xlib.h>"; then CONFIGURE_FLAGS+=("--with-x=yes"); else CONFIGURE_FLAGS+=("--with-x=no"); fi
-  if gcc -E - >/dev/null 2>&1 <<< "#include <cairo.h>"; then CONFIGURE_FLAGS+=("--with-cairo=yes"); else CONFIGURE_FLAGS+=("--with-cairo=no"); fi
-fi
+    # Detecta recursos gráficos
+    if gcc -E - >/dev/null 2>&1 <<< "#include <readline/readline.h>"; then CONFIGURE_FLAGS+=("--with-readline=yes"); else CONFIGURE_FLAGS+=("--with-readline=no"); fi
+    if [[ "$HEADLESS" -eq 1 ]]; then
+      CONFIGURE_FLAGS+=( "--with-x=no" "--with-cairo=no" )
+    else
+      if gcc -E - >/dev/null 2>&1 <<< "#include <X11/Xlib.h>"; then CONFIGURE_FLAGS+=("--with-x=yes"); else CONFIGURE_FLAGS+=("--with-x=no"); fi
+      if gcc -E - >/dev/null 2>&1 <<< "#include <cairo.h>"; then CONFIGURE_FLAGS+=("--with-cairo=yes"); else CONFIGURE_FLAGS+=("--with-cairo=no"); fi
+    fi
 
-# RPATH: garanta que o binário do R encontre libs locais mesmo fora desta sessão
-RPATHS=()
-for dep in zlib bzip2 xz pcre2 curl; do
-  [[ -d "${PREFIX}/deps/${dep}/lib" ]] && RPATHS+=("${PREFIX}/deps/${dep}/lib")
-done
-# toolchain local (se existir)
-if [[ -n "${TOOLCHAIN_DIR}" ]]; then
-  [[ -d "${TOOLCHAIN_DIR}/lib64" ]] && RPATHS+=("${TOOLCHAIN_DIR}/lib64")
-  [[ -d "${TOOLCHAIN_DIR}/lib"  ]] && RPATHS+=("${TOOLCHAIN_DIR}/lib")
-fi
+    # RPATH: garanta que o binário do R encontre libs locais mesmo fora desta sessão
+    RPATHS=()
+    for dep in zlib bzip2 xz pcre2 curl; do
+      [[ -d "${PREFIX}/deps/${dep}/lib" ]] && RPATHS+=("${PREFIX}/deps/${dep}/lib")
+    done
+    # toolchain local (se existir)
+    if [[ -n "${TOOLCHAIN_DIR}" ]]; then
+      [[ -d "${TOOLCHAIN_DIR}/lib64" ]] && RPATHS+=("${TOOLCHAIN_DIR}/lib64")
+      [[ -d "${TOOLCHAIN_DIR}/lib"  ]] && RPATHS+=("${TOOLCHAIN_DIR}/lib")
+    fi
 
-if [[ "${#RPATHS[@]}" -gt 0 ]]; then
-  export LDFLAGS="${LDFLAGS:-} -Wl,-rpath,$(IFS=:; echo "${RPATHS[*]}")"
-fi
+    if [[ "${#RPATHS[@]}" -gt 0 ]]; then
+      export LDFLAGS="${LDFLAGS:-} -Wl,-rpath,$(IFS=:; echo "${RPATHS[*]}")"
+    fi
 
-log "Executando ./configure..."
-if ! ./configure "${CONFIGURE_FLAGS[@]}"; then
-  err "A configuração do R falhou. Verifique a saída de erro acima."
-  die "Build abortado."
-fi
-ok "Configuração concluída."
+    log "Executando ./configure..."
+    if ! ./configure "${CONFIGURE_FLAGS[@]}"; then
+      err "A configuração do R falhou. Verifique a saída de erro acima."
+      die "Build abortado."
+    fi
+    ok "Configuração concluída."
 
-# 7. Compilar e Instalar
-log "Compilando R com ${JOBS} processos (make -j${JOBS})... Isso pode demorar."
-make -j"${JOBS}"
-ok "Compilação concluída."
+    # 7. Compilar e Instalar
+    log "Compilando R com ${JOBS} processos (make -j${JOBS})... Isso pode demorar."
+    make -j"${JOBS}"
+    ok "Compilação concluída."
 
-log "Instalando R em ${INSTALL_DIR}..."
-make install
-ok "Instalação concluída."
+    log "Instalando R em ${INSTALL_DIR}..."
+    make install
+    ok "Instalação concluída."
 
-# 8. Criar wrappers robustos (em vez de apenas symlinks)
-log "Criando wrappers em ${BIN_DIR} garantindo LD_LIBRARY_PATH..."
+    # 8. Criar wrappers robustos (em vez de apenas symlinks)
+    log "Criando wrappers em ${BIN_DIR} garantindo LD_LIBRARY_PATH..."
 
-mkdir -p "${BIN_DIR}"
+    mkdir -p "${BIN_DIR}"
 
-WRAP_ENV_FILE="${PREFIX}/R/env.sh"
-cat > "${WRAP_ENV_FILE}" <<'ENVSH'
+    WRAP_ENV_FILE="${PREFIX}/R/env.sh"
+    cat > "${WRAP_ENV_FILE}" <<'ENVSH'
 # Ambiente para executar R instalado localmente
 # (carregado pelos wrappers R/Rscript)
 # OBS: ESTE ARQUIVO É GERADO PELO INSTALADOR
 # Edite com cuidado se precisar customizar.
 ENVSH
 
-# Preenche env.sh com LD_LIBRARY_PATH cumulativo
-{
-  echo 'export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}"'
-  # deps locais
-  for dep in zlib bzip2 xz pcre2 curl; do
-    libdir="${PREFIX}/deps/${dep}/lib"
-    echo "[[ -d \"$libdir\" ]] && export LD_LIBRARY_PATH=\"$libdir:${LD_LIBRARY_PATH}\""
-  done
-  # toolchain local, se existir
-  if [[ -n "${TOOLCHAIN_DIR}" ]]; then
-    [[ -d "${TOOLCHAIN_DIR}/lib64" ]] && echo "export LD_LIBRARY_PATH=\"${TOOLCHAIN_DIR}/lib64:\${LD_LIBRARY_PATH}\""
-    [[ -d "${TOOLCHAIN_DIR}/lib"  ]] && echo "export LD_LIBRARY_PATH=\"${TOOLCHAIN_DIR}/lib:\${LD_LIBRARY_PATH}\""
-  fi
-} >> "${WRAP_ENV_FILE}"
+    # Preenche env.sh com LD_LIBRARY_PATH cumulativo
+    {
+      echo 'export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}"'
+      # deps locais
+      for dep in zlib bzip2 xz pcre2 curl; do
+        libdir="${PREFIX}/deps/${dep}/lib"
+        echo "[[ -d \"$libdir\" ]] && export LD_LIBRARY_PATH=\"$libdir:${LD_LIBRARY_PATH}\""
+      done
+      # toolchain local, se existir
+      if [[ -n "${TOOLCHAIN_DIR}" ]]; then
+        [[ -d "${TOOLCHAIN_DIR}/lib64" ]] && echo "export LD_LIBRARY_PATH=\"${TOOLCHAIN_DIR}/lib64:\${LD_LIBRARY_PATH}\""
+        [[ -d "${TOOLCHAIN_DIR}/lib"  ]] && echo "export LD_LIBRARY_PATH=\"${TOOLCHAIN_DIR}/lib:\${LD_LIBRARY_PATH}\""
+      fi
+    } >> "${WRAP_ENV_FILE}"
 
-# Wrapper R
-cat > "${BIN_DIR}/R" <<WRAP
+    # Wrapper R
+    cat > "${BIN_DIR}/R" <<WRAP
 #!/usr/bin/env bash
 # Wrapper gerado pelo instalador - garante libs em runtime
 PREFIX="${PREFIX}"
@@ -325,10 +359,10 @@ INSTALL_DIR="${INSTALL_DIR}"
 source "\${PREFIX}/R/env.sh"
 exec "\${INSTALL_DIR}/bin/R" "\$@"
 WRAP
-chmod +x "${BIN_DIR}/R"
+    chmod +x "${BIN_DIR}/R"
 
-# Wrapper Rscript
-cat > "${BIN_DIR}/Rscript" <<WRAP
+    # Wrapper Rscript
+    cat > "${BIN_DIR}/Rscript" <<WRAP
 #!/usr/bin/env bash
 # Wrapper gerado pelo instalador - garante libs em runtime
 PREFIX="${PREFIX}"
@@ -337,34 +371,41 @@ INSTALL_DIR="${INSTALL_DIR}"
 source "\${PREFIX}/R/env.sh"
 exec "\${INSTALL_DIR}/bin/Rscript" "\$@"
 WRAP
-chmod +x "${BIN_DIR}/Rscript"
+    chmod +x "${BIN_DIR}/Rscript"
 
-# Symlink "current" para conveniência
-ln -sfn "${INSTALL_DIR}" "${PREFIX}/R/current"
-ok "Wrappers R, Rscript e link 'current' criados."
+    # Symlink "current" para conveniência
+    ln -sfn "${INSTALL_DIR}" "${PREFIX}/R/current"
+    ok "Wrappers R, Rscript e link 'current' criados."
 
-# 9. Mensagem final e verificação
-log "Verificação final..."
-INSTALLED_R_VERSION=$("${BIN_DIR}/R" --version | head -n1 || true)
-if [[ "$INSTALLED_R_VERSION" != *"R version ${R_VERSION}"* ]]; then
-  err "Atenção: a versão relatada por '${BIN_DIR}/R --version' não casa com a esperada."
-  err "Relato: '${INSTALLED_R_VERSION}' | Esperado: 'R version ${R_VERSION}'"
-  die "Verificação falhou! Confira logs e ambiente."
-fi
+    # 9. Configurar o PATH
+    setup_path
 
-ok "R ${R_VERSION} foi instalado com sucesso!"
-echo
-echo "--- Próximos Passos ---"
-echo "1. Garanta que '${BIN_DIR}' esteja no seu PATH (adicione ao ~/.bashrc ou ~/.zshrc):"
-echo "   export PATH=\"${BIN_DIR}:\$PATH\""
-echo
-echo "2. Abra um NOVO terminal e execute 'R' para iniciar."
-echo "   A instalação está em: ${INSTALL_DIR}"
-echo "   A versão ativa está em: ${PREFIX}/R/current"
-echo
-echo "Dica: se você quiser rodar o binário real diretamente (sem o wrapper),"
-echo "      assegure-se de exportar manualmente um LD_LIBRARY_PATH contendo:"
-echo "      - libs das dependências em ${PREFIX}/deps/*/lib"
-if [[ -n "${TOOLCHAIN_DIR}" ]]; then
-  echo "      - libs da toolchain: ${TOOLCHAIN_DIR}/lib64 e/ou ${TOOLCHAIN_DIR}/lib"
-fi
+    # 10. Mensagem final e verificação
+    log "Verificação final..."
+    INSTALLED_R_VERSION=$("${BIN_DIR}/R" --version | head -n1 || true)
+    if [[ "$INSTALLED_R_VERSION" != *"R version ${R_VERSION}"* ]]; then
+      err "Atenção: a versão relatada por '${BIN_DIR}/R --version' não casa com a esperada."
+      err "Relato: '${INSTALLED_R_VERSION}' | Esperado: 'R version ${R_VERSION}'"
+      die "Verificação falhou! Confira logs e ambiente."
+    fi
+
+    ok "R ${R_VERSION} foi instalado com sucesso!"
+    echo
+    echo "--- Próximos Passos ---"
+    echo "1. Se você não configurou o PATH automaticamente, execute:"
+    echo "   export PATH=\"${BIN_DIR}:\$PATH\""
+    echo "   (adicione esta linha ao seu arquivo de configuração do shell para persistência)"
+    echo
+    echo "2. Abra um NOVO terminal e execute 'R' para iniciar."
+    echo "   A instalação está em: ${INSTALL_DIR}"
+    echo "   A versão ativa está em: ${PREFIX}/R/current"
+    echo
+    echo "Dica: se você quiser rodar o binário real diretamente (sem o wrapper),"
+    echo "      assegure-se de exportar manualmente um LD_LIBRARY_PATH contendo:"
+    echo "      - libs das dependências em ${PREFIX}/deps/*/lib"
+    if [[ -n "${TOOLCHAIN_DIR}" ]]; then
+      echo "      - libs da toolchain: ${TOOLCHAIN_DIR}/lib64 e/ou ${TOOLCHAIN_DIR}/lib"
+    fi
+}
+
+main
